@@ -7,16 +7,16 @@ __v0_jsx-dev-runtime.ts
 .vercel/
 
 
-# Environment variables
+# Environment variables (keep secrets out of git)
+.env
 .env*.local
 .env.local
-.env.example
-.env
-
 
 # Common ignores
 node_modules
 .next/
+__pycache__/
+*.pyc
 .DS_Store
 
 deploy.*
