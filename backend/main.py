@@ -24,6 +24,7 @@ logger = logging.getLogger(__name__)
 # ── Config ────────────────────────────────────────────────────────────────────
 GEMINI_API_KEY = os.getenv("GEMINI_API_KEY", "")
 TAVILY_API_KEY = os.getenv("TAVILY_API_KEY", "")
+GEMINI_MODEL = "gemini-2.5-flash"
 
 MAX_FILE_SIZE_BYTES = None  # No file size limit
 MAX_PDF_CHARS = 15_000
@@ -93,7 +94,7 @@ def extract_json_array(text: str) -> list:
     return json.loads(text)
 
 
-def call_gemini(prompt: str, model_name: str = "gemini-2.5-flash") -> str:
+def call_gemini(prompt: str, model_name: str = GEMINI_MODEL) -> str:
     """Call Gemini with retry logic. Returns raw text."""
     if not GEMINI_API_KEY:
         raise ValueError("GEMINI_API_KEY is not configured.")
@@ -428,6 +429,7 @@ async def health():
     return {
         "status": "ok",
         "gemini_configured": bool(GEMINI_API_KEY),
+        "gemini_model": GEMINI_MODEL,
         "tavily_configured": bool(TAVILY_API_KEY),
         "tesseract_available": is_tesseract_available(),
     }
@@ -538,7 +540,7 @@ async def analyze(file: UploadFile = File(...)):
             if used_ocr:
                 yield sse({"type": "ocr_complete", "chars": len(raw_text.strip())})
 
-            # ── Step 1: Extract claims (Gemini call #1) ───────────────────────
+            # ── Step 1: Extract claims (Gemini 2.5 Flash call #1) ───────────
             yield sse({"type": "step", "step": 1})
             logger.info("SSE Step 1: Extracting claims")
             try:
@@ -564,9 +566,9 @@ async def analyze(file: UploadFile = File(...)):
                 enriched.append({**claim, "search_results": results})
                 yield sse({"type": "search_progress", "current": i + 1, "total": len(claims)})
 
-            # ── Step 3: Batch verdict (Gemini call #2) ────────────────────────
+            # ── Step 3: Batch verdict (Gemini 2.5 Flash call #2) ────────────
             yield sse({"type": "step", "step": 3})
-            logger.info("SSE Step 3: Generating verdicts (batched Gemini call)")
+            logger.info("SSE Step 3: Generating verdicts (batched Gemini 2.5 Flash call)")
             try:
                 verdicts = await asyncio.to_thread(generate_verdicts, enriched)
             except HTTPException as exc:

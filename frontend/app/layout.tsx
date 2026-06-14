@@ -12,10 +12,6 @@ const geistMono = Geist_Mono({
 export const metadata: Metadata = {
   title: 'Fact-Check Agent | Truth Layer',
   description: 'Upload a document. We verify every claim against live data.',
-  icons: {
-    icon: '/icon.svg',
-    apple: '/icon.svg',
-  },
 }
 
 export const viewport: Viewport = {

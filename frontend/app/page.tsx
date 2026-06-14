@@ -19,9 +19,9 @@ interface AnalysisResult {
 type PageState = 'idle' | 'loading' | 'results' | 'error';
 
 const LOADING_STEPS = [
+  'Reading document...',
   'Extracting claims...',
   'Searching live web...',
-  'Verifying facts...',
   'Generating report...',
 ];
 
@@ -32,17 +32,36 @@ export default function Home() {
   const [currentStep, setCurrentStep] = useState(0);
   const [claimsTotal, setClaimsTotal] = useState(0);
   const [claimsSearched, setClaimsSearched] = useState(0);
+  const [ocrTotal, setOcrTotal] = useState(0);
+  const [ocrCurrent, setOcrCurrent] = useState(0);
+  const [isOcrMode, setIsOcrMode] = useState(false);
   const [isLoading, setIsLoading] = useState(false);
   const [uploadKey, setUploadKey] = useState(0);
 
-  const handleFileSelect = async (selectedFile: File) => {
-    setError(null);
+  const clearAnalysisState = () => {
     setResult(null);
+    setError(null);
+    setCurrentStep(0);
     setClaimsTotal(0);
     setClaimsSearched(0);
+    setOcrTotal(0);
+    setOcrCurrent(0);
+    setIsOcrMode(false);
+  };
+
+  const handleFileChange = (file: File | null) => {
+    if (file && (state === 'results' || state === 'error')) {
+      clearAnalysisState();
+      setState('idle');
+      setIsLoading(false);
+    }
+  };
+
+  const handleFileSelect = async (selectedFile: File) => {
+    clearAnalysisState();
 
     if (selectedFile.size === 0) {
-      setError('This PDF file is empty (0 bytes). Please upload a valid document.');
+      setError('This file is empty (0 bytes). Please upload a valid PDF or image.');
       setState('error');
       return;
     }
@@ -114,6 +133,13 @@ export default function Home() {
 
           if (event.type === 'step') {
             setCurrentStep(event.step as number);
+          } else if (event.type === 'ocr_mode') {
+            setIsOcrMode(true);
+          } else if (event.type === 'ocr_progress') {
+            setOcrTotal(event.total as number);
+            setOcrCurrent(event.current as number);
+          } else if (event.type === 'ocr_complete') {
+            setIsOcrMode(false);
           } else if (event.type === 'claims_found') {
             setClaimsTotal(event.count as number);
           } else if (event.type === 'search_progress') {
@@ -139,11 +165,7 @@ export default function Home() {
   };
 
   const handleReset = () => {
-    setResult(null);
-    setError(null);
-    setCurrentStep(0);
-    setClaimsTotal(0);
-    setClaimsSearched(0);
+    clearAnalysisState();
     setIsLoading(false);
     setState('idle');
     setUploadKey((k) => k + 1);
@@ -172,7 +194,7 @@ export default function Home() {
           {/* Feature pills */}
           <div className="flex flex-wrap justify-center gap-3 mt-8">
             {[
-              { icon: '📄', label: 'PDF Upload' },
+              { icon: '📄', label: 'PDF & Image Upload' },
               { icon: '🔍', label: 'Claim Extraction' },
               { icon: '🌐', label: 'Live Web Verification' },
               { icon: '✅', label: 'AI Verdict' },
@@ -193,6 +215,7 @@ export default function Home() {
           <UploadCard
             key={uploadKey}
             onFileSelect={handleFileSelect}
+            onFileChange={handleFileChange}
             isLoading={isLoading}
           />
         </div>
@@ -215,6 +238,9 @@ export default function Home() {
                   currentStep={currentStep}
                   claimsTotal={claimsTotal}
                   claimsSearched={claimsSearched}
+                  ocrTotal={ocrTotal}
+                  ocrCurrent={ocrCurrent}
+                  isOcrMode={isOcrMode}
                 />
               </div>
             )}

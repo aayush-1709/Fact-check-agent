@@ -1,19 +1,22 @@
 # Fact-Check Agent
 
-A **Truth Layer** full-stack application that extracts factual claims from PDF documents and verifies them against live web data.
+A **Truth Layer** full-stack application that extracts factual claims from **PDF documents and images**, then verifies them against live web data.
 
 | Part | Stack | Folder |
 |------|-------|--------|
-| **Backend** | Python · FastAPI · Gemini · Tavily | `backend/` |
+| **Backend** | Python · FastAPI · Gemini 2.5 Flash · Tavily | `backend/` |
 | **Frontend** | Next.js · React · Tailwind CSS | `frontend/` |
 
-Upload a PDF → the backend extracts verifiable claims, searches the web for each one, and returns structured verdicts: **verified**, **inaccurate**, or **false**. The frontend shows live progress and a filterable results dashboard.
+Upload a **PDF or image** → the backend reads the content (text layer or free Tesseract OCR), extracts verifiable claims, searches the web for each one, and returns structured verdicts: **verified**, **inaccurate**, or **false**. The frontend shows live progress and a filterable results dashboard.
+
+**Supported uploads:** PDF · PNG · JPG · JPEG · WEBP · GIF · BMP · TIFF
 
 ---
 
 ## Table of Contents
 
 - [Complete Workflow](#complete-workflow)
+- [Image & PDF Analysis](#image--pdf-analysis)
 - [Backend](#backend)
 - [Frontend](#frontend)
 - [Run Locally](#run-locally)
@@ -25,19 +28,52 @@ Upload a PDF → the backend extracts verifiable claims, searches the web for ea
 ## Complete Workflow
 
 ```
-User uploads PDF (frontend)
+User uploads PDF or image (frontend)
         │
         ▼
 POST /analyze  ──►  Server-Sent Events (SSE) stream
         │
-        ├── Step 0  Extract PDF text          (pypdf)
-        ├── Step 1  Extract claims            (Gemini 2.5 Pro — call #1)
+        ├── Step 0  Read document text
+        │             • PDF → pypdf text layer
+        │             • Image → Tesseract OCR (direct)
+        │             • Image PDF / scan → Tesseract OCR (up to 8 pages)
+        ├── Step 1  Extract claims            (Gemini 2.5 Flash — call #1)
         ├── Step 2  Web search per claim      (Tavily — progress events)
-        ├── Step 3  Batch verdict generation  (Gemini 2.5 Pro — call #2)
+        ├── Step 3  Batch verdict generation  (Gemini 2.5 Flash — call #2)
         └── Step 4  Aggregate & return JSON
 ```
 
-**Cost design:** exactly **2 Gemini calls** per document (never one call per claim). PDF text is truncated to ~15,000 characters. Max **12 claims** per run.
+**Cost design:** exactly **2 Gemini 2.5 Flash calls** per upload (never one call per claim). Extracted text is truncated to ~15,000 characters. Max **12 claims** per run.
+
+---
+
+## Image & PDF Analysis
+
+The backend handles three input types using **free Tesseract OCR** (no paid vision API):
+
+| Input type | How text is read | Example use case |
+|------------|------------------|------------------|
+| **Text-based PDF** | `pypdf` reads embedded text | Reports, whitepapers with selectable text |
+| **Image-based / scanned PDF** | PyMuPDF renders pages → Tesseract OCR (max 8 pages) | Scanned documents, image-only PDFs |
+| **Image file** | Tesseract OCR directly on the upload | Marketing screenshots, campaign posters, photos of slides |
+
+### Image upload flow
+
+1. User uploads PNG, JPG, WEBP, etc. from the frontend drop zone
+2. Backend runs **Tesseract OCR** on the image (grayscale + autocontrast preprocessing)
+3. Extracted text feeds the same claim extraction → Tavily search → **Gemini 2.5 Flash** verdict pipeline
+
+### PDF upload flow
+
+1. Try `pypdf` text extraction first (fast, no OCR cost)
+2. If fewer than ~50 characters are found, automatically fall back to **Tesseract OCR** page-by-page
+3. SSE emits `ocr_progress` events so the UI shows page-by-page OCR progress
+
+### Requirements for image analysis
+
+- **Tesseract** must be installed locally, or use the **Docker** deploy on Render (Tesseract included)
+- Check `GET /health` → `"tesseract_available": true` before testing image uploads
+- Windows: install [Tesseract](https://github.com/UB-Mannheim/tesseract/wiki) or set `TESSERACT_CMD` in `.env`
 
 ---
 
@@ -47,10 +83,10 @@ Python **FastAPI** API — the Truth Layer that powers claim extraction and veri
 
 ### Pipeline
 
-1. **PDF text extraction** — Uses `pypdf` to read the PDF text layer.
-2. **Claim extraction** — Sends text to **Gemini 2.5 Pro** with a strict prompt; returns a JSON array of factual claims (statistics, dates, percentages, market sizes, etc.).
+1. **Document reading** — PDFs use `pypdf` first; image files and image-only PDFs use **Tesseract OCR** via PyMuPDF + Pillow (free, no vision API).
+2. **Claim extraction** — Sends text to **Gemini 2.5 Flash** (`gemini-2.5-flash`) with a strict prompt; returns factual claims as JSON.
 3. **Web verification** — For each claim, queries **Tavily Search** (top 4 results: title, URL, snippet).
-4. **Verdict generation** — One batched **Gemini** call evaluates all claims + snippets; assigns `status`, `correct_fact`, and `explanation`.
+4. **Verdict generation** — One batched **Gemini 2.5 Flash** call evaluates all claims + snippets; assigns `status`, `correct_fact`, and `explanation`.
 5. **Response** — Summary counts plus claims with attached sources.
 
 Progress is streamed to the client via **SSE** so the UI can show real per-claim search progress.
@@ -63,7 +99,8 @@ backend/
 ├── requirements.txt     # Python dependencies
 ├── .env.example         # API key template
 ├── deploy.md            # Render deployment guide
-└── render.yaml          # Render Blueprint config
+├── Dockerfile           # Docker image with Tesseract (Render)
+└── render.yaml          # Render Blueprint config (repo root)
 ```
 
 ### Dependencies
@@ -72,7 +109,9 @@ backend/
 |---------|---------|
 | `fastapi` / `uvicorn` | Web server |
 | `pypdf` | PDF text extraction |
-| `google-generativeai` | Gemini API |
+| `pymupdf` | PDF page rendering for OCR |
+| `pytesseract` + `Pillow` | Tesseract OCR (images + image PDF fallback) |
+| `google-generativeai` | Gemini 2.5 Flash API (`gemini-2.5-flash`) |
 | `httpx` | Tavily HTTP client |
 | `python-multipart` | File uploads |
 | `python-dotenv` | Environment variables |
@@ -83,9 +122,12 @@ Copy `backend/.env.example` to `backend/.env` and fill in your keys:
 
 | Variable | Required | Description |
 |----------|----------|-------------|
-| `GEMINI_API_KEY` | Yes | [Google AI Studio](https://aistudio.google.com/app/apikey) |
+| `GEMINI_API_KEY` | Yes | [Google AI Studio](https://aistudio.google.com/app/apikey) — powers `gemini-2.5-flash` |
 | `TAVILY_API_KEY` | Yes | [Tavily](https://app.tavily.com/sign-up) — 1,000 searches/month free |
+| `TESSERACT_CMD` | No | Path to tesseract binary if not on PATH (Windows) |
 | `PORT` | Auto | Set by Render in production |
+
+Install **Tesseract** locally for image uploads and image-based PDFs. Verify with `GET /health` → `"tesseract_available": true`.
 
 ### API Endpoints
 
@@ -95,7 +137,9 @@ Copy `backend/.env.example` to `backend/.env` and fill in your keys:
 {
   "status": "ok",
   "gemini_configured": true,
-  "tavily_configured": true
+  "gemini_model": "gemini-2.5-flash",
+  "tavily_configured": true,
+  "tesseract_available": true
 }
 ```
 
@@ -103,7 +147,8 @@ Copy `backend/.env.example` to `backend/.env` and fill in your keys:
 
 | | |
 |---|---|
-| **Request** | `multipart/form-data` — field `file` (PDF only) |
+| **Request** | `multipart/form-data` — field `file` (PDF or image) |
+| **Accepted types** | PDF · PNG · JPG · JPEG · WEBP · GIF · BMP · TIFF |
 | **Response** | `text/event-stream` (SSE) |
 
 **SSE events:**
@@ -111,7 +156,9 @@ Copy `backend/.env.example` to `backend/.env` and fill in your keys:
 | Event | Payload | When |
 |-------|---------|------|
 | `step` | `{ "step": 0–3 }` | Pipeline stage change |
-| `claims_found` | `{ "count": N }` | After Gemini extracts claims |
+| `claims_found` | `{ "count": N }` | After Gemini 2.5 Flash extracts claims |
+| `ocr_mode` | `{}` | Image upload or PDF OCR fallback started |
+| `ocr_progress` | `{ "current": N, "total": M }` | During Tesseract OCR (per page or single image) |
 | `search_progress` | `{ "current": N, "total": M }` | After each Tavily search |
 | `result` | `{ "data": { ... } }` | Final JSON payload |
 | `error` | `{ "detail": "..." }` | On failure |
@@ -137,7 +184,7 @@ Copy `backend/.env.example` to `backend/.env` and fill in your keys:
 
 | Field | Type | Description |
 |-------|------|-------------|
-| `claim_text` | string | Original claim from the PDF |
+| `claim_text` | string | Original claim from the document or image |
 | `status` | enum | `verified`, `inaccurate`, or `false` |
 | `correct_fact` | string \| null | Accurate information when claim is wrong or outdated |
 | `sources` | array | Web references (`title`, `url`) |
@@ -147,16 +194,16 @@ Copy `backend/.env.example` to `backend/.env` and fill in your keys:
 
 | Code | Meaning |
 |------|---------|
-| 400 | Not a PDF or empty file |
-| 422 | PDF has no extractable text |
-| 503 | `GEMINI_API_KEY` not configured |
+| 400 | Invalid file type, or empty file |
+| 422 | No readable text (even after OCR) |
+| 503 | `GEMINI_API_KEY` not configured, or Tesseract missing for image uploads |
 
 ### Error Handling
 
-- Gemini and Tavily calls retry up to **2 times**
-- Malformed Gemini JSON → regex fallback to extract JSON array
+- **Gemini 2.5 Flash** and Tavily calls retry up to **2 times**
+- Image uploads and image PDFs require **Tesseract** on the server
+- Malformed Gemini 2.5 Flash JSON → regex fallback to extract JSON array
 - Missing Tavily key → claims marked **false** with *"No verification data available"*
-- Image-only / scanned PDFs → fail at text extraction (no OCR yet)
 
 ---
 
@@ -166,8 +213,8 @@ Next.js web app — upload UI, live SSE progress, and results dashboard.
 
 ### Features
 
-- **Upload** — Drag-and-drop PDF zone; upload card stays visible while results load below
-- **Live progress** — SSE-driven steps plus per-claim mini progress bar during Tavily searches
+- **Upload** — Drag-and-drop **PDF or image**; upload card stays visible while results load below
+- **Live progress** — SSE-driven steps, OCR page progress for images/scans, per-claim search bar during Tavily
 - **Results** — Summary stats with distribution bar; filterable claim cards (Verified / Inaccurate / False)
 - **Design** — Responsive layout, status colors (green / amber / red), source links
 
@@ -195,16 +242,16 @@ frontend/
 
 ### Frontend ↔ Backend Integration
 
-1. User selects PDF → `FormData` POST to `/analyze`
+1. User selects PDF or image → `FormData` POST to `/analyze`
 2. Frontend reads the SSE stream via `ReadableStream`
-3. Loading UI updates from `step`, `claims_found`, and `search_progress` events
+3. Loading UI updates from `step`, `ocr_progress`, `claims_found`, and `search_progress` events
 4. On `result`, renders summary stats and claim cards
 
 ### Frontend Error Handling
 
 - Missing `NEXT_PUBLIC_API_URL` configuration
 - Network errors and API failures (SSE `error` events)
-- Invalid file types (PDF only)
+- Invalid file types (PDF and images only)
 - Retry from error state without losing the upload area
 
 ---
@@ -215,6 +262,7 @@ frontend/
 
 - Python 3.11+
 - Node.js 18+
+- **Tesseract OCR** (required for image uploads and scanned PDFs)
 - Free API keys: [Google AI Studio](https://aistudio.google.com/app/apikey) · [Tavily](https://app.tavily.com/sign-up)
 
 ### Terminal 1 — Backend
@@ -225,6 +273,7 @@ cp .env.example .env
 # Edit .env — add GEMINI_API_KEY and TAVILY_API_KEY
 
 pip install -r requirements.txt
+# Install Tesseract: https://github.com/UB-Mannheim/tesseract/wiki (Windows)
 uvicorn main:app --reload --port 8000
 ```
 
@@ -257,20 +306,12 @@ npm start
 
 | Service | Platform | Config |
 |---------|----------|--------|
-| **Backend** | [Render](https://render.com) | See `backend/deploy.md` or use `backend/render.yaml` |
+| **Backend** | [Render](https://render.com) (Docker) | `deploy.md` · `render.yaml` · `backend/Dockerfile` |
 | **Frontend** | [Vercel](https://vercel.com) | Root dir: `frontend` · env: `NEXT_PUBLIC_API_URL` |
 
-**Backend (Render) quick reference:**
+**Backend (Render) — Docker:**
 
-```bash
-# Build
-pip install -r requirements.txt
-
-# Start
-uvicorn main:app --host 0.0.0.0 --port $PORT
-```
-
-Set environment variables on Render: `GEMINI_API_KEY`, `TAVILY_API_KEY`.
+Render builds from `backend/Dockerfile` (Python 3.11 + Tesseract). No manual `pip install` needed on Render when using Docker runtime.
 
 **Frontend (Vercel):**
 
@@ -282,9 +323,11 @@ NEXT_PUBLIC_API_URL=https://your-render-backend.onrender.com
 
 ## Limitations
 
-- **Text-based PDFs only** — `pypdf` reads the text layer; image-only or scanned PDFs usually fail with *"Could not extract meaningful text"*
+- **OCR quality** — Tesseract is free but weaker on glossy marketing layouts, stylized fonts, and low-contrast images than paid vision APIs
+- **Image analysis** — Single-frame uploads (one image = one OCR pass); no multi-image batching
+- **8 page OCR cap** — Only the first 8 PDF pages are OCR'd to keep processing fast on free tier
 - **12 claim cap** — Limits API cost per document
-- **Free tier limits** — Gemini Pro rate limits; Tavily 1,000 searches/month
+- **Free tier limits** — Gemini 2.5 Flash (15 RPM · 1M tokens/day) and Tavily rate limits apply
 - **Not legal advice** — AI + web search verdicts; human review recommended for critical use
 
 ---

@@ -1,17 +1,56 @@
 'use client';
 
 import { useState, useRef } from 'react';
-import { Upload, FileText } from 'lucide-react';
+import { Upload, FileText, ImageIcon } from 'lucide-react';
 
 interface UploadCardProps {
   onFileSelect: (file: File) => void;
+  onFileChange?: (file: File | null) => void;
   isLoading: boolean;
 }
 
-export function UploadCard({ onFileSelect, isLoading }: UploadCardProps) {
+const ACCEPTED_MIME_TYPES = new Set([
+  'application/pdf',
+  'image/png',
+  'image/jpeg',
+  'image/webp',
+  'image/gif',
+  'image/bmp',
+  'image/tiff',
+]);
+
+const ACCEPTED_EXTENSIONS = ['.pdf', '.png', '.jpg', '.jpeg', '.webp', '.gif', '.bmp', '.tif', '.tiff'];
+
+const ACCEPT_ATTR = '.pdf,.png,.jpg,.jpeg,.webp,.gif,.bmp,.tif,.tiff,image/*,application/pdf';
+
+function isAcceptedFile(file: File): boolean {
+  if (ACCEPTED_MIME_TYPES.has(file.type)) return true;
+  const dot = file.name.lastIndexOf('.');
+  if (dot === -1) return false;
+  return ACCEPTED_EXTENSIONS.includes(file.name.slice(dot).toLowerCase());
+}
+
+function isImageFile(file: File): boolean {
+  return file.type.startsWith('image/') || /\.(png|jpe?g|webp|gif|bmp|tiff?)$/i.test(file.name);
+}
+
+export function UploadCard({ onFileSelect, onFileChange, isLoading }: UploadCardProps) {
   const [file, setFile] = useState<File | null>(null);
   const [isDragActive, setIsDragActive] = useState(false);
   const fileInputRef = useRef<HTMLInputElement>(null);
+
+  const applyFile = (next: File | null) => {
+    setFile(next);
+    onFileChange?.(next);
+  };
+
+  const openFilePicker = () => {
+    if (isLoading) return;
+    const input = fileInputRef.current;
+    if (!input) return;
+    input.value = '';
+    input.click();
+  };
 
   const handleDrag = (e: React.DragEvent) => {
     e.preventDefault();
@@ -29,20 +68,17 @@ export function UploadCard({ onFileSelect, isLoading }: UploadCardProps) {
     setIsDragActive(false);
 
     const droppedFile = e.dataTransfer.files[0];
-    if (droppedFile && droppedFile.type === 'application/pdf') {
-      setFile(droppedFile);
+    if (droppedFile && isAcceptedFile(droppedFile)) {
+      applyFile(droppedFile);
     }
   };
 
   const handleFileInput = (e: React.ChangeEvent<HTMLInputElement>) => {
     const selectedFile = e.target.files?.[0];
-    if (selectedFile && selectedFile.type === 'application/pdf') {
-      setFile(selectedFile);
+    if (selectedFile && isAcceptedFile(selectedFile)) {
+      applyFile(selectedFile);
     }
-  };
-
-  const handleClick = () => {
-    fileInputRef.current?.click();
+    e.target.value = '';
   };
 
   const formatFileSize = (bytes: number) => {
@@ -51,6 +87,8 @@ export function UploadCard({ onFileSelect, isLoading }: UploadCardProps) {
     return `${(bytes / 1024 / 1024).toFixed(2)} MB`;
   };
 
+  const PreviewIcon = file && isImageFile(file) ? ImageIcon : FileText;
+
   return (
     <div className="w-full max-w-2xl mx-auto">
       <div
@@ -58,7 +96,7 @@ export function UploadCard({ onFileSelect, isLoading }: UploadCardProps) {
         onDragLeave={handleDrag}
         onDragOver={handleDrag}
         onDrop={handleDrop}
-        onClick={isLoading ? undefined : handleClick}
+        onClick={isLoading ? undefined : openFilePicker}
         className={`relative border-2 border-dashed rounded-3xl p-14 text-center transition-all duration-300 shadow-sm ${
           isLoading
             ? 'border-border bg-muted/30 cursor-default'
@@ -70,7 +108,7 @@ export function UploadCard({ onFileSelect, isLoading }: UploadCardProps) {
         <input
           ref={fileInputRef}
           type="file"
-          accept=".pdf"
+          accept={ACCEPT_ATTR}
           onChange={handleFileInput}
           className="hidden"
         />
@@ -84,14 +122,14 @@ export function UploadCard({ onFileSelect, isLoading }: UploadCardProps) {
             </div>
             <div>
               <p className="text-xl font-semibold text-foreground leading-tight">
-                Drag and drop your PDF here
+                Drag and drop your PDF or image here
               </p>
               <p className="text-sm text-muted-foreground mt-2 font-medium">
                 or <span className="text-primary font-semibold">click to browse</span> your files
               </p>
             </div>
-            <div className="flex justify-center gap-4 pt-1">
-              {['PDF only', 'Results in ~30s'].map((hint) => (
+            <div className="flex flex-wrap justify-center gap-x-4 gap-y-1 pt-1">
+              {['PDF or image', 'PNG · JPG · WEBP', 'Results in ~30s'].map((hint) => (
                 <span key={hint} className="text-xs text-muted-foreground/70 font-medium flex items-center gap-1">
                   <span className="w-1 h-1 rounded-full bg-muted-foreground/40 inline-block" />
                   {hint}
@@ -103,7 +141,7 @@ export function UploadCard({ onFileSelect, isLoading }: UploadCardProps) {
           <div className="space-y-4">
             <div className="flex justify-center">
               <div className="rounded-2xl bg-gradient-to-br from-green-100 to-green-50 p-5">
-                <FileText className="w-8 h-8 text-green-600" />
+                <PreviewIcon className="w-8 h-8 text-green-600" />
               </div>
             </div>
             <div>
@@ -111,14 +149,15 @@ export function UploadCard({ onFileSelect, isLoading }: UploadCardProps) {
                 {file.name}
               </p>
               <p className="text-sm text-muted-foreground mt-1 font-medium">
-                {formatFileSize(file.size)} • Ready to analyze
+                {formatFileSize(file.size)} • {isImageFile(file) ? 'Image' : 'PDF'} • Ready to analyze
               </p>
             </div>
             {!isLoading && (
               <button
+                type="button"
                 onClick={(e) => {
                   e.stopPropagation();
-                  setFile(null);
+                  openFilePicker();
                 }}
                 className="text-xs text-primary hover:text-primary/80 font-semibold transition-colors"
               >
@@ -131,9 +170,8 @@ export function UploadCard({ onFileSelect, isLoading }: UploadCardProps) {
 
       {file && (
         <button
-          onClick={() => {
-            onFileSelect(file);
-          }}
+          type="button"
+          onClick={() => onFileSelect(file)}
           disabled={isLoading}
           className={`w-full mt-6 py-4 px-6 rounded-2xl font-semibold text-base transition-all duration-200 shadow-sm hover:shadow-lg ${
             isLoading
@@ -141,7 +179,7 @@ export function UploadCard({ onFileSelect, isLoading }: UploadCardProps) {
               : 'bg-primary hover:bg-primary/90 text-primary-foreground active:scale-95'
           }`}
         >
-          {isLoading ? 'Analyzing Document...' : 'Analyze Document'}
+          {isLoading ? 'Analyzing...' : 'Analyze Document'}
         </button>
       )}
     </div>

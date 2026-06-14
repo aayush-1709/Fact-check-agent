@@ -5,6 +5,9 @@ interface LoadingIndicatorProps {
   currentStep: number;
   claimsTotal?: number;
   claimsSearched?: number;
+  ocrTotal?: number;
+  ocrCurrent?: number;
+  isOcrMode?: boolean;
 }
 
 export function LoadingIndicator({
@@ -12,14 +15,19 @@ export function LoadingIndicator({
   currentStep,
   claimsTotal = 0,
   claimsSearched = 0,
+  ocrTotal = 0,
+  ocrCurrent = 0,
+  isOcrMode = false,
 }: LoadingIndicatorProps) {
   const progressPct = Math.round(((currentStep + 1) / steps.length) * 100);
   const claimsPct = claimsTotal > 0 ? Math.round((claimsSearched / claimsTotal) * 100) : 0;
+  const ocrPct = ocrTotal > 0 ? Math.round((ocrCurrent / ocrTotal) * 100) : 0;
+  const showOcrBar = currentStep === 0 && isOcrMode && ocrTotal > 0;
+  const showClaimBar = currentStep === 2 && claimsTotal > 0;
 
   return (
     <div className="w-full max-w-2xl mx-auto">
       <div className="bg-card border border-border rounded-2xl p-10 shadow-sm">
-        {/* Overall progress bar */}
         <div className="mb-8">
           <div className="flex justify-between text-xs font-semibold text-muted-foreground mb-2">
             <span>Processing your document</span>
@@ -33,19 +41,13 @@ export function LoadingIndicator({
           </div>
         </div>
 
-        {/* Steps */}
         <div className="space-y-5">
           {steps.map((step, idx) => {
-            const done    = idx < currentStep;
-            const active  = idx === currentStep;
-            const pending = idx > currentStep;
-
-            // Show live claim progress on the active step when we have claim data
-            const showClaimBar = active && claimsTotal > 0;
+            const done = idx < currentStep;
+            const active = idx === currentStep;
 
             return (
               <div key={idx} className="flex items-start gap-4">
-                {/* Status icon */}
                 <div className="flex-shrink-0 mt-0.5">
                   {done ? (
                     <div className="w-9 h-9 rounded-full bg-green-500 flex items-center justify-center shadow-sm">
@@ -62,7 +64,6 @@ export function LoadingIndicator({
                   )}
                 </div>
 
-                {/* Label + optional claim bar */}
                 <div className="flex-1 min-w-0">
                   <div className="flex items-center justify-between">
                     <p className={`font-semibold text-sm transition-colors ${
@@ -73,15 +74,34 @@ export function LoadingIndicator({
                     {done && (
                       <span className="text-xs font-semibold text-green-600 ml-2">Done</span>
                     )}
-                    {showClaimBar && (
+                    {active && showOcrBar && (
+                      <span className="text-xs font-semibold text-primary ml-2 tabular-nums">
+                        {ocrCurrent}/{ocrTotal}
+                      </span>
+                    )}
+                    {active && showClaimBar && (
                       <span className="text-xs font-semibold text-primary ml-2 tabular-nums">
                         {claimsSearched}/{claimsTotal}
                       </span>
                     )}
                   </div>
 
-                  {/* Per-claim live progress bar */}
-                  {showClaimBar && (
+                  {active && showOcrBar && (
+                    <div className="mt-2">
+                      <div className="h-2 bg-muted rounded-full overflow-hidden">
+                        <div
+                          className="h-full bg-amber-500 rounded-full transition-all duration-500 ease-out"
+                          style={{ width: `${ocrPct}%` }}
+                        />
+                      </div>
+                      <p className="text-xs text-muted-foreground mt-1.5">
+                        OCR reading page {ocrCurrent} of {ocrTotal}
+                        {ocrPct > 0 && ` · ${ocrPct}% complete`}
+                      </p>
+                    </div>
+                  )}
+
+                  {active && showClaimBar && (
                     <div className="mt-2">
                       <div className="h-2 bg-muted rounded-full overflow-hidden">
                         <div
@@ -96,8 +116,7 @@ export function LoadingIndicator({
                     </div>
                   )}
 
-                  {/* Pulse bar when active but no claim data yet */}
-                  {active && !showClaimBar && (
+                  {active && !showOcrBar && !showClaimBar && (
                     <div className="mt-2 h-1.5 bg-muted rounded-full overflow-hidden w-40">
                       <div className="h-full bg-primary/50 rounded-full animate-pulse w-3/4" />
                     </div>
@@ -109,7 +128,7 @@ export function LoadingIndicator({
         </div>
 
         <p className="text-center text-xs text-muted-foreground mt-8 pt-6 border-t border-border">
-          This may take up to 30 seconds — AI is reading the web in real time
+          Image PDFs use free Tesseract OCR · fact-check uses live web search
         </p>
       </div>
     </div>
