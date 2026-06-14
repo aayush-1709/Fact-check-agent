@@ -41,6 +41,12 @@ export default function Home() {
     setClaimsTotal(0);
     setClaimsSearched(0);
 
+    if (selectedFile.size === 0) {
+      setError('This PDF file is empty (0 bytes). Please upload a valid document.');
+      setState('error');
+      return;
+    }
+
     try {
       setIsLoading(true);
       setState('loading');
@@ -54,13 +60,35 @@ export default function Home() {
         throw new Error('API URL not configured. Please set NEXT_PUBLIC_API_URL environment variable.');
       }
 
-      const response = await fetch(`${apiUrl}/analyze`, {
-        method: 'POST',
-        body: formData,
-      });
+      let response: Response;
+      try {
+        response = await fetch(`${apiUrl}/analyze`, {
+          method: 'POST',
+          body: formData,
+        });
+      } catch {
+        throw new Error(
+          `Cannot reach the backend at ${apiUrl}. Is the server running? Check NEXT_PUBLIC_API_URL.`
+        );
+      }
 
       if (!response.ok) {
-        throw new Error(`API error: ${response.statusText}`);
+        let detail = response.statusText;
+        try {
+          const errBody = await response.json();
+          if (typeof errBody.detail === 'string') {
+            detail = errBody.detail;
+          } else if (Array.isArray(errBody.detail)) {
+            detail = errBody.detail.map((d: { msg?: string }) => d.msg).join(', ');
+          }
+        } catch {
+          // response body is not JSON
+        }
+        throw new Error(
+          detail
+            ? `API error (${response.status}): ${detail}`
+            : `API error (${response.status}). Check that the backend is deployed and NEXT_PUBLIC_API_URL is correct.`
+        );
       }
 
       // Consume the SSE stream

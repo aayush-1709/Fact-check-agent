@@ -46,7 +46,9 @@ export function UploadCard({ onFileSelect, isLoading }: UploadCardProps) {
   };
 
   const formatFileSize = (bytes: number) => {
-    return (bytes / 1024 / 1024).toFixed(2);
+    if (bytes < 1024) return `${bytes} B`;
+    if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(1)} KB`;
+    return `${(bytes / 1024 / 1024).toFixed(2)} MB`;
   };
 
   return (
@@ -109,7 +111,7 @@ export function UploadCard({ onFileSelect, isLoading }: UploadCardProps) {
                 {file.name}
               </p>
               <p className="text-sm text-muted-foreground mt-1 font-medium">
-                {formatFileSize(file.size)} MB • Ready to analyze
+                {formatFileSize(file.size)} • Ready to analyze
               </p>
             </div>
             {!isLoading && (
