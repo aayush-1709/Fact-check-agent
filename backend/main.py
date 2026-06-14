@@ -30,6 +30,20 @@ MAX_PDF_CHARS = 15_000
 MAX_CLAIMS = 12
 SEARCH_RESULTS_PER_CLAIM = 4
 MAX_RETRIES = 2
+MIN_TEXT_CHARS = 50
+MAX_OCR_PAGES = 8
+OCR_RENDER_SCALE = 2.0
+
+IMAGE_CONTENT_TYPES = {
+    "image/png",
+    "image/jpeg",
+    "image/webp",
+    "image/gif",
+    "image/bmp",
+    "image/tiff",
+    "image/x-png",
+}
+IMAGE_EXTENSIONS = {".png", ".jpg", ".jpeg", ".webp", ".gif", ".bmp", ".tif", ".tiff"}
 
 if GEMINI_API_KEY:
     genai.configure(api_key=GEMINI_API_KEY)
@@ -144,7 +158,81 @@ def search_web(query: str) -> list[dict]:
     return []
 
 
-# ── Step 1: PDF extraction ────────────────────────────────────────────────────
+# ── Step 1: PDF extraction (+ OCR fallback) ───────────────────────────────────
+
+def configure_tesseract() -> None:
+    """Point pytesseract at the system binary (Windows + custom paths)."""
+    import pytesseract
+
+    cmd = os.getenv("TESSERACT_CMD", "").strip()
+    if cmd:
+        pytesseract.pytesseract.tesseract_cmd = cmd
+        return
+
+    if os.name == "nt":
+        for candidate in (
+            r"C:\Program Files\Tesseract-OCR\tesseract.exe",
+            r"C:\Program Files (x86)\Tesseract-OCR\tesseract.exe",
+        ):
+            if os.path.isfile(candidate):
+                pytesseract.pytesseract.tesseract_cmd = candidate
+                return
+
+
+def is_tesseract_available() -> bool:
+    try:
+        configure_tesseract()
+        import pytesseract
+
+        pytesseract.get_tesseract_version()
+        return True
+    except Exception as exc:
+        logger.warning("Tesseract not available: %s", exc)
+        return False
+
+
+def is_image_file(content_type: Optional[str], filename: Optional[str]) -> bool:
+    if content_type:
+        if content_type in IMAGE_CONTENT_TYPES or content_type.startswith("image/"):
+            return True
+    if filename:
+        ext = os.path.splitext(filename.lower())[1]
+        return ext in IMAGE_EXTENSIONS
+    return False
+
+
+def is_pdf_file(content_type: Optional[str], filename: Optional[str]) -> bool:
+    if content_type == "application/pdf":
+        return True
+    if filename and filename.lower().endswith(".pdf"):
+        return True
+    return content_type == "application/octet-stream" and bool(
+        filename and filename.lower().endswith(".pdf")
+    )
+
+
+def ocr_pil_image(img) -> str:
+    """Run Tesseract on a PIL image (grayscale + autocontrast)."""
+    import pytesseract
+    from PIL import ImageOps
+
+    configure_tesseract()
+    img = ImageOps.grayscale(img)
+    img = ImageOps.autocontrast(img)
+    return pytesseract.image_to_string(
+        img,
+        lang="eng",
+        config="--psm 6 --oem 3",
+    )
+
+
+def ocr_image_bytes(file_bytes: bytes) -> str:
+    """OCR a standalone image file (PNG, JPG, WEBP, etc.)."""
+    from PIL import Image
+
+    img = Image.open(BytesIO(file_bytes))
+    return ocr_pil_image(img.convert("RGB"))
+
 
 def extract_pdf_text(file_bytes: bytes) -> str:
     try:
@@ -157,6 +245,31 @@ def extract_pdf_text(file_bytes: bytes) -> str:
         return "\n".join(pages)
     except Exception as exc:
         raise HTTPException(status_code=422, detail=f"PDF parse error: {exc}")
+
+
+def get_ocr_page_count(file_bytes: bytes) -> int:
+    import fitz
+
+    doc = fitz.open(stream=file_bytes, filetype="pdf")
+    count = min(len(doc), MAX_OCR_PAGES)
+    doc.close()
+    return count
+
+
+def ocr_pdf_page(file_bytes: bytes, page_index: int) -> str:
+    """OCR a single PDF page using PyMuPDF + Tesseract."""
+    import fitz
+    from PIL import Image
+
+    doc = fitz.open(stream=file_bytes, filetype="pdf")
+    try:
+        page = doc[page_index]
+        matrix = fitz.Matrix(OCR_RENDER_SCALE, OCR_RENDER_SCALE)
+        pix = page.get_pixmap(matrix=matrix, alpha=False)
+        img = Image.frombytes("RGB", [pix.width, pix.height], pix.samples)
+        return ocr_pil_image(img)
+    finally:
+        doc.close()
 
 
 # ── Step 2: Claim extraction ──────────────────────────────────────────────────
@@ -312,16 +425,27 @@ def build_response(enriched_claims: list[dict], verdicts: list[dict]) -> Analysi
 
 @app.get("/health")
 async def health():
-    return {"status": "ok", "gemini_configured": bool(GEMINI_API_KEY), "tavily_configured": bool(TAVILY_API_KEY)}
+    return {
+        "status": "ok",
+        "gemini_configured": bool(GEMINI_API_KEY),
+        "tavily_configured": bool(TAVILY_API_KEY),
+        "tesseract_available": is_tesseract_available(),
+    }
 
 
 @app.post("/analyze")
 async def analyze(file: UploadFile = File(...)):
-    if file.content_type not in ("application/pdf", "application/octet-stream"):
-        if not (file.filename or "").lower().endswith(".pdf"):
-            raise HTTPException(status_code=400, detail="Only PDF files are accepted.")
+    content_type = file.content_type or ""
+    filename = file.filename or ""
+
+    if not is_pdf_file(content_type, filename) and not is_image_file(content_type, filename):
+        raise HTTPException(
+            status_code=400,
+            detail="Only PDF and image files are accepted (PNG, JPG, JPEG, WEBP, GIF, BMP, TIFF).",
+        )
 
     file_bytes = await file.read()
+    upload_is_image = is_image_file(content_type, filename)
 
     if len(file_bytes) == 0:
         raise HTTPException(status_code=400, detail="Uploaded file is empty.")
@@ -334,18 +458,85 @@ async def analyze(file: UploadFile = File(...)):
 
     async def event_stream():
         try:
-            # ── Step 0: Extract PDF text ──────────────────────────────────────
+            # ── Step 0: Extract text (PDF, image, or OCR fallback) ────────────
             yield sse({"type": "step", "step": 0})
-            logger.info("SSE Step 0: Extracting PDF text")
-            try:
-                raw_text = await asyncio.to_thread(extract_pdf_text, file_bytes)
-            except HTTPException as exc:
-                yield sse({"type": "error", "detail": exc.detail})
+            used_ocr = False
+
+            if upload_is_image:
+                logger.info("SSE Step 0: OCR on uploaded image")
+                if not is_tesseract_available():
+                    yield sse({
+                        "type": "error",
+                        "detail": (
+                            "Tesseract OCR is not available on the server. "
+                            "Image uploads require OCR to read text."
+                        ),
+                    })
+                    return
+
+                yield sse({"type": "ocr_mode"})
+                yield sse({"type": "ocr_progress", "current": 0, "total": 1})
+                try:
+                    raw_text = await asyncio.to_thread(ocr_image_bytes, file_bytes)
+                except Exception as exc:
+                    logger.error("Image OCR failed: %s", exc)
+                    yield sse({"type": "error", "detail": f"Could not read text from image: {exc}"})
+                    return
+                yield sse({"type": "ocr_progress", "current": 1, "total": 1})
+                used_ocr = True
+                logger.info("Image OCR extracted %d chars", len(raw_text.strip()))
+            else:
+                logger.info("SSE Step 0: Extracting PDF text")
+                try:
+                    raw_text = await asyncio.to_thread(extract_pdf_text, file_bytes)
+                except HTTPException as exc:
+                    yield sse({"type": "error", "detail": exc.detail})
+                    return
+
+                if len(raw_text.strip()) < MIN_TEXT_CHARS:
+                    logger.info(
+                        "Text layer too short (%d chars), attempting OCR fallback",
+                        len(raw_text.strip()),
+                    )
+                    if not is_tesseract_available():
+                        yield sse({
+                            "type": "error",
+                            "detail": (
+                                "This PDF appears to be image-based and Tesseract OCR is not "
+                                "available on the server. Install tesseract-ocr or upload an image/PDF with text."
+                            ),
+                        })
+                        return
+
+                    page_count = await asyncio.to_thread(get_ocr_page_count, file_bytes)
+                    if page_count == 0:
+                        yield sse({"type": "error", "detail": "PDF has no pages to read."})
+                        return
+
+                    yield sse({"type": "ocr_mode"})
+                    ocr_parts: list[str] = []
+                    for i in range(page_count):
+                        page_text = await asyncio.to_thread(ocr_pdf_page, file_bytes, i)
+                        if page_text.strip():
+                            ocr_parts.append(page_text.strip())
+                        yield sse({"type": "ocr_progress", "current": i + 1, "total": page_count})
+
+                    raw_text = "\n\n".join(ocr_parts)
+                    used_ocr = True
+                    logger.info("OCR extracted %d chars from %d pages", len(raw_text), page_count)
+
+            if len(raw_text.strip()) < MIN_TEXT_CHARS:
+                yield sse({
+                    "type": "error",
+                    "detail": (
+                        "Could not read enough text from this PDF. "
+                        "It may be blank, heavily graphical, or OCR could not decode the content."
+                    ),
+                })
                 return
 
-            if not raw_text or len(raw_text.strip()) < 50:
-                yield sse({"type": "error", "detail": "Could not extract meaningful text from this PDF. It may be scanned/image-based."})
-                return
+            if used_ocr:
+                yield sse({"type": "ocr_complete", "chars": len(raw_text.strip())})
 
             # ── Step 1: Extract claims (Gemini call #1) ───────────────────────
             yield sse({"type": "step", "step": 1})
